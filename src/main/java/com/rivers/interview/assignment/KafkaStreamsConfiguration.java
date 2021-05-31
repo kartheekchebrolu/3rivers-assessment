@@ -12,9 +12,11 @@ import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.streams.*;
 import org.apache.kafka.streams.kstream.*;
 
+import java.time.Duration;
 import java.util.Collections;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static io.confluent.kafka.serializers.AbstractKafkaAvroSerDeConfig.SCHEMA_REGISTRY_URL_CONFIG;
@@ -30,6 +32,8 @@ public class KafkaStreamsConfiguration {
     public static final String CUSTOMER_TOPIC = "Customer";
     public static final String BALANCE_TOPIC = "Balance";
     public static final String CUSTOMER_BALANCE_TOPIC = "CustomerBalance";
+    public static final String CUSTOMER_REKEY_TOPIC = "KeyCustomer";
+
 
 
     public Properties loadProperties() {
@@ -46,8 +50,7 @@ public class KafkaStreamsConfiguration {
         return props;
     }
 
-    public void join() throws InterruptedException {
-        final Properties properties = loadProperties();
+    private  Topology getTopology(Properties properties) {
         final Map<String, String> serdeConfig = Collections.singletonMap(SCHEMA_REGISTRY_URL_CONFIG,
                 SCHEMA_REG_URL);
 
@@ -63,41 +66,24 @@ public class KafkaStreamsConfiguration {
         transactionSpecificAvroSerde.configure(serdeConfig, false);
 
         StreamsBuilder builder = new StreamsBuilder();
-
-
         KStream<String, Customer> customerStream =
-                builder.stream(CUSTOMER_TOPIC, Consumed.with(stringSerde, customerSpecificAvroSerde));
+                builder.<String, Customer>stream(CUSTOMER_TOPIC).map((key, customer) -> new KeyValue<>(String.valueOf(customer.getAccountId()), customer));
+        customerStream.to(CUSTOMER_REKEY_TOPIC);
+        KTable<String, Customer> customerKTable = builder.table(CUSTOMER_REKEY_TOPIC);
+
         KStream<String, Transaction> transactionStream =
-                builder.stream(BALANCE_TOPIC, Consumed.with(stringSerde, transactionSpecificAvroSerde));
-        KStream<String, Customer> keyCustomerStream = customerStream.map((key, customer) ->
-                new KeyValue<>(String.valueOf(customer.getAccountId()), customer));
-        KStream<String, Transaction> keyTransactionStream = transactionStream.map((key, transaction) ->
-                new KeyValue<>(String.valueOf(transaction.getAccountId()), transaction));
+                builder.<String, Transaction>stream(BALANCE_TOPIC).map((key, transaction) -> new KeyValue<>(String.valueOf(transaction.getAccountId()), transaction));
+        KStream<String, CustomerBalance> customerBalanceStream =
+                transactionStream.join(customerKTable, new CustomerBalanceJoiner());
 
-        KStream<String, CustomerBalance> joined = keyCustomerStream.join(keyTransactionStream,
-                (customer, balance) ->
-                        CustomerBalance.newBuilder().
-                                setAccountId(customer.getAccountId())
-                                .setBalance(balance.getBalance())
-                                .setPhoneNumber(customer.getPhoneNumber())
-                                .setCustomerId(customer.getCustomerId())
-                                .build(),
-                JoinWindows.of(TimeUnit.MINUTES.toMillis(5)),
-                Joined.with(
-                        Serdes.String(),
-                        customerSpecificAvroSerde,
-                        transactionSpecificAvroSerde)
-        );
+        customerBalanceStream.to(CUSTOMER_BALANCE_TOPIC, Produced.with(stringSerde, customerBalanceSerde));
+        return builder.build();
+    }
+    public void join() throws InterruptedException {
 
-        joined.print(Printed.toSysOut());
-        joined.to(CUSTOMER_BALANCE_TOPIC, Produced.with(stringSerde, customerBalanceSerde));
-
-        final Topology topology = builder.build();
-        KafkaStreams streams = new KafkaStreams(topology, properties);
-        streams.cleanUp();
+        final Properties properties = loadProperties();
+        KafkaStreams streams = new KafkaStreams(getTopology(properties), properties);
         streams.start();
-        Thread.sleep(3000);
-        streams.close();
     }
 
     public static void main(String[] args) throws InterruptedException {
