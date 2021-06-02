@@ -9,7 +9,9 @@ public class CustomerBalanceJoiner implements ValueJoiner<Transaction, Customer,
 
     @Override
     public CustomerBalance apply(Transaction transaction, Customer customer) {
-        return CustomerBalance.newBuilder().setAccountId(customer.getAccountId()).
+        CustomerBalance balance = CustomerBalance.newBuilder().setAccountId(customer.getAccountId()).
                 setCustomerId(customer.getCustomerId()).setBalance(transaction.getBalance()).
-                setPhoneNumber(customer.getPhoneNumber()).build();    }
+                setPhoneNumber(customer.getPhoneNumber()).build();
+        System.out.println(balance.toString());
+        return balance;   }
 }
